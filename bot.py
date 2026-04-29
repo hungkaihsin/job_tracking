@@ -147,12 +147,12 @@ def handle_message(msg: dict, db: NotionDB, state: sqlite3.Connection):
 
     fields = {
         "company": result.company or "Unknown",
-        "position": result.position or msg["subject"][:80] or "Unknown",
+        # Don't fall back to subject — that pollutes the Position column with "Thank you for applying" etc.
+        "position": result.position or "Unknown",
         "status": result.status or ("Needs Review" if is_low_conf else "Applied"),
         "source": result.source or "Other",
         "last_update": msg["date"].date().isoformat(),
         "last_email_subject": msg["subject"],
-        "gmail_link": msg["gmail_link"],
     }
     if msg.get("first_url"):
         fields["job_link"] = msg["first_url"]

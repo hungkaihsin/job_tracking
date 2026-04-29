@@ -83,7 +83,6 @@ SCHEMA = {
         },
         "Job link": {"url": {}},
         "Last email subject": {"rich_text": {}},
-        "Gmail link": {"url": {}},
         "Notes": {"rich_text": {}},
     },
 }

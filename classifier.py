@@ -82,13 +82,47 @@ STATUS_PATTERNS = [
     ]),
 ]
 
-# ---------- Position extraction patterns (subject is most reliable) ----------
+# ---------- Company extraction from subject (most reliable signal) ----------
+# Order matters: more specific patterns first.
+COMPANY_SUBJECT_PATTERNS = [
+    # "Thank you for applying to/at Foo" / "Thanks for Applying to Foo!"
+    r"thank(?:s| you) for (?:applying|your application)\b[^,.\n]*?\b(?:to|at|with)\s+([A-Z][\w &./\-]+?)(?:\s*[-–—|!?,]|\s*$)",
+    # "Thank you for your interest in Foo"
+    r"thank(?:s| you) for your interest in\s+([A-Z][\w &./\-]+?)(?:\s*[-–—|!?,]|\s*$)",
+    # "Your application to/for/at Foo" / "Your Foo Application"
+    r"\byour application (?:to|for|at|with)\s+([A-Z][\w &./\-]+?)(?:\s*[-–—|!?,]|\s*$)",
+    r"\byour\s+([A-Z][\w &./\-]+?)\s+(?:Careers\s+)?Application\b",
+    # "Application received - Foo" / "Application Confirmation: Foo"
+    r"application (?:received|confirmation|status)\b[\s:.\-—]+([A-Z][\w &./\-]+?)(?:\s*[-–—|!?,]|\s*$)",
+    # "Regarding your application to/at Foo"
+    r"regarding (?:your )?(?:application|candidacy|.+? application)\b[^.]*?\b(?:to|at|with|for)\s+([A-Z][\w &./\-]+?)(?:\s*[-–—|!?,]|\s*$)",
+    # "Update on your application at Foo"
+    r"update on your application (?:to|at|with|for)\s+([A-Z][\w &./\-]+?)(?:\s*[-–—|!?,]|\s*$)",
+    # "<Foo> - thanks for applying" or "<Foo>: ..." (company at start)
+    r"^([A-Z][\w &./\-]+?)\s*[-–—:|]+\s*(?:thank|application|your application)",
+]
+
+# ---------- Position extraction patterns (subject is sometimes reliable) ----------
+# These ONLY fire when wording strongly implies a role title is present.
 POSITION_SUBJECT_PATTERNS = [
-    r"application (?:for|to) (?:the )?(.+?)(?: at | position| role|$)",
-    r"your application (?:for|to) (?:the )?(.+?)(?: at | position| role|$)",
-    r"thank(?:s| you) for applying (?:for|to) (?:the )?(.+?)(?: at | position| role|$)",
-    r"^(?:re:\s*)?(.+?) at .+",                    # "Software Engineer at Figma"
-    r"interview (?:for|with) (.+?)(?: at | role|$)",
+    # "Application for the position of Foo" / "for the role of Foo"
+    r"(?:application )?for the (?:position|role) of\s+(.+?)(?:\s+at\s|\s*[-–—|]|\s*$)",
+    r"applying for (?:the )?(.+?)(?:\s+at\s|\s*[-–—|]|\s+position\b|\s+role\b|\s*$)",
+    # "Foo Engineer at Bar" — leading text before "at" looks like position
+    r"^(?:re:\s*)?([A-Z][^|–—\-]+?\b(?:Engineer|Developer|Analyst|Scientist|Designer|Manager|Intern)\b[^|–—\-]*?)\s+at\s+",
+    # "Interview for Foo Role"
+    r"interview (?:for|with) (?:the )?(.+?)(?:\s+at\s|\s+role\b|\s*[-–—|]|\s*$)",
+]
+
+# Body patterns — many ATS emails repeat the role in the body even when subject is generic.
+POSITION_BODY_PATTERNS = [
+    r"\bfor the (?:position|role) of\s+([^\n.,;]+?)(?:\s+at\s|\s+with\s|\s*[.,;\n])",
+    r"\bfor the\s+([^\n.,;]+?)\s+(?:position|role|opportunity)\b",
+    r"\bapplying for (?:the )?([^\n.,;]+?)(?:\s+at\s|\s+role\b|\s+position\b|\s*[.,;\n])",
+    r"\byour application for (?:the )?([^\n.,;]+?)(?:\s+at\s|\s+role\b|\s+position\b|\s*[.,;\n])",
+    r"\bregarding your application for\s+([^\n.,;]+?)(?:\s+at\s|\s*[.,;\n])",
+    # "Position: Software Engineer" / "Role - Software Engineer"
+    r"\b(?:Position|Role|Job Title|Title)\s*[:\-]\s*([^\n]+?)(?:\n|$)",
 ]
 
 
@@ -116,29 +150,75 @@ def _detect_status(text: str) -> tuple[Optional[str], float]:
     return None, 0.0
 
 
+def _clean_company(s: str) -> str:
+    """Tidy up extracted company strings."""
+    s = s.strip(" -–—|:!?,.\"'")
+    # Strip leading prepositions that slipped into the capture (case-insensitive
+    # patterns can match "with Esri" / "to Stripe" — drop the prep).
+    s = re.sub(r"^(with|to|at|for|in|the|a|an)\s+", "", s, flags=re.I)
+    # Drop trailing role-ish suffixes
+    s = re.sub(r"\s+(Careers|Recruiting|Talent|Hiring|Team)$", "", s, flags=re.I)
+    return s.strip(" -–—|:!?,.\"'")
+
+
 def _extract_company(from_name: str, from_addr: str, subject: str, body: str) -> Optional[str]:
-    # 1. ATS emails put the company in the From name: "Figma via Greenhouse <no-reply@greenhouse.io>"
+    dom = _domain(from_addr)
+    is_ats = any(ats in dom for ats in (
+        "greenhouse", "lever", "workday", "ashby", "smartrecruiters",
+        "icims", "jobvite", "myworkdayjobs", "paradox", "phenompeople",
+    ))
+
+    # 1. PRIMARY: extract company from subject — works regardless of sender domain.
+    for pat in COMPANY_SUBJECT_PATTERNS:
+        m = re.search(pat, subject, re.I)
+        if m:
+            cand = _clean_company(m.group(1))
+            if 2 <= len(cand) <= 60 and not cand.lower().startswith(("application", "thank")):
+                return cand
+
+    # 2. ATS "via" pattern: "Figma via Greenhouse <no-reply@greenhouse.io>"
     if from_name:
         m = re.match(r"^(.+?)\s+(?:via|through)\s+(?:Greenhouse|Lever|Workday|Ashby)", from_name, re.I)
         if m:
-            return m.group(1).strip()
-    # 2. Subject pattern: "... at <Company>"
-    m = re.search(r"\bat\s+([A-Z][\w &.\-]+?)(?:\s*[-–—|]|\s*$|\s+for\b)", subject)
+            return _clean_company(m.group(1))
+
+    # 3. For ATS senders, the From-NAME usually IS the company ("Stripe", "HeyGen Recruiting").
+    if is_ats and from_name:
+        cleaned = _clean_company(from_name)
+        # Skip generic ATS labels
+        if cleaned and not re.search(r"\b(no.?reply|do.?not.?reply|notification)\b", cleaned, re.I):
+            return cleaned
+
+    # 4. Body lookup: "Thank you for applying to <Company>" in first 1500 chars
+    body_head = body[:1500] if body else ""
+    for pat in COMPANY_SUBJECT_PATTERNS:
+        m = re.search(pat, body_head, re.I)
+        if m:
+            cand = _clean_company(m.group(1))
+            if 2 <= len(cand) <= 60 and not cand.lower().startswith(("application", "thank")):
+                return cand
+
+    # 5. Subject "... at <Company>" fallback
+    m = re.search(r"\bat\s+([A-Z][\w &./\-]+?)(?:\s*[-–—|!?,.]|\s*$|\s+for\b)", subject)
     if m:
-        return m.group(1).strip()
-    # 3. From-name itself, if it doesn't look like a person
-    if from_name and not re.search(r"\b(team|recruiting|talent|careers?|jobs?|hr|hiring)\b", from_name, re.I):
-        # Looks like a company brand
-        if from_name[:1].isupper() and " " not in from_name.strip().split(",")[0]:
-            return from_name.strip()
-    # 4. Fallback: domain (skip ATS domains)
-    dom = _domain(from_addr)
-    if dom and not any(ats in dom for ats in ATS_DOMAINS):
-        # Strip common email subdomains
+        return _clean_company(m.group(1))
+
+    # 6. From-name when it looks like a brand (and isn't an ATS we already handled)
+    if from_name and not is_ats:
+        if not re.search(r"\b(team|recruiting|talent|careers?|jobs?|hr|hiring|no.?reply)\b", from_name, re.I):
+            if from_name[:1].isupper():
+                return _clean_company(from_name.split(",")[0])
+
+    # 7. Last resort: company domain (skip ATS / mail providers / known noisy stems)
+    BAD_DOMAIN_STEMS = {
+        "gmail", "google", "yahoo", "outlook", "hotmail",
+        "greenhouse-mail", "make", "send", "mail", "email", "notify", "notification",
+    }
+    if dom and not is_ats:
         parts = dom.split(".")
         if len(parts) >= 2:
             base = parts[-2]
-            if base not in {"gmail", "google", "yahoo", "outlook", "hotmail"}:
+            if base.lower() not in BAD_DOMAIN_STEMS:
                 return base.capitalize()
     return None
 
@@ -153,19 +233,91 @@ def _extract_position(subject: str, body: str) -> Optional[str]:
     return None
 
 
-JOB_KEYWORDS = (
-    "application", "applied", "interview", "recruiter", "hiring",
-    "candidacy", "offer", "onsite", "screen", "assessment", "candidate",
+# Multi-word phrases that strongly indicate a real application/interview email.
+# Single keywords ("interview", "offer", "application") pull in too much noise.
+JOB_PHRASES = (
+    # Application confirmations
+    "thank you for applying",
+    "thanks for applying",
+    "we have received your application",
+    "we received your application",
+    "your application has been received",
+    "application has been submitted",
+    "application confirmation",
+    "your application to",
+    "your application for",
+    "regarding your application",
+    "regarding your candidacy",
+    "thank you for your application",
+    "thank you for your interest in joining",
+    "thank you for your interest in our",
+    # Interviews
+    "phone screen",
+    "phone interview",
+    "technical screen",
+    "technical interview",
+    "schedule an interview",
+    "schedule a call",
+    "schedule a phone",
+    "recruiter screen",
+    "recruiter call",
+    "onsite interview",
+    "on-site interview",
+    "final round",
+    "next round",
+    "interview invitation",
+    "interview request",
+    # Offers / decisions
+    "we are pleased to offer",
+    "we are excited to offer",
+    "we'd like to offer you",
+    "we would like to offer",
+    "extending an offer",
+    "offer letter",
+    "decided to move forward",
+    "move forward with other candidates",
+    "not moving forward",
+    "regret to inform",
+    "no longer being considered",
+    "after careful consideration",
+    "after careful review",
+    "decision on your application",
+    "update on your application",
+    "your application status",
+    "not selected for this",
+    # Assessments
+    "online assessment",
+    "coding assessment",
+    "coding challenge",
+    "take-home assignment",
+    "take home assignment",
+    "hackerrank invite",
+    "hackerrank assessment",
+)
+
+# Sender domains that are basically NEVER real job emails.
+NOISE_DOMAINS = (
+    "medium.com", "coursera.org", "udemy.com", "edx.org", "pluralsight.com",
+    "harpercollins.com", "newsletter.", "marketing.", "promo.", "deals.",
+)
+
+# ATS domains that should always pass the filter (real recruiting infra).
+STRONG_ATS = (
+    "greenhouse.io", "lever.co", "myworkday.com", "myworkdayjobs.com",
+    "ashbyhq.com", "smartrecruiters.com", "icims.com", "jobvite.com",
 )
 
 
 def looks_job_related(subject: str, body: str, from_addr: str) -> bool:
-    blob = f"{subject}\n{body[:2000]}".lower()
-    if any(k in blob for k in JOB_KEYWORDS):
+    dom = _domain(from_addr)
+    if any(noise in dom for noise in NOISE_DOMAINS):
+        return False
+    # ATS senders almost always mean it's a real job email.
+    if any(ats in dom for ats in STRONG_ATS):
         return True
-    if any(ats in _domain(from_addr) for ats in ATS_DOMAINS):
-        return True
-    return False
+    # Otherwise require a specific phrase match.
+    blob = f"{subject}\n{body[:3000]}".lower()
+    return any(p in blob for p in JOB_PHRASES)
 
 
 def classify(subject: str, body: str, from_name: str, from_addr: str) -> ClassifyResult:

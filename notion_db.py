@@ -89,7 +89,6 @@ class NotionDB:
         source: Optional[str] = None,
         job_link: Optional[str] = None,
         last_email_subject: Optional[str] = None,
-        gmail_link: Optional[str] = None,
         notes: Optional[str] = None,
     ) -> dict:
         props: dict = {
@@ -110,8 +109,6 @@ class NotionDB:
             props["Job link"] = {"url": job_link}
         if last_email_subject is not None:
             props["Last email subject"] = {"rich_text": [{"text": {"content": last_email_subject[:1900]}}]}
-        if gmail_link:
-            props["Gmail link"] = {"url": gmail_link}
         if notes is not None:
             props["Notes"] = {"rich_text": [{"text": {"content": notes[:1900]}}]}
         return props

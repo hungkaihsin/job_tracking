@@ -2,41 +2,31 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key>
-    <string>com.danielhung.jobbot</string>
-
-    <key>WorkingDirectory</key>
-    <string>/Users/danielhung/Desktop/02. Projects/job_tracking</string>
-
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/bin/caffeinate</string>
-        <string>-i</string>
-        <string>/opt/miniconda3/bin/python3</string>
-        <string>/Users/danielhung/Desktop/02. Projects/job_tracking/bot.py</string>
-    </array>
-
-    <key>RunAtLoad</key>
-    <true/>
-
-    <key>KeepAlive</key>
-    <true/>
-
-    <key>ThrottleInterval</key>
-    <integer>10</integer>
-
-    <key>StandardOutPath</key>
-    <string>/Users/danielhung/Desktop/02. Projects/job_tracking/bot.log</string>
-
-    <key>StandardErrorPath</key>
-    <string>/Users/danielhung/Desktop/02. Projects/job_tracking/bot.log</string>
-
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/opt/miniconda3/bin:/usr/local/bin:/usr/bin:/bin</string>
-        <key>PYTHONUNBUFFERED</key>
-        <string>1</string>
-    </dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/miniconda3/bin:/usr/local/bin:/usr/bin:/bin</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.danielhung.jobbot</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/miniconda3/bin/python3</string>
+		<string>/Users/danielhung/Desktop/02. Projects/job_tracking/bot.py</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/tmp/jobbot.launchd.log</string>
+	<key>StandardOutPath</key>
+	<string>/tmp/jobbot.launchd.log</string>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>WorkingDirectory</key>
+	<string>/Users/danielhung/Desktop/02. Projects/job_tracking</string>
 </dict>
 </plist>

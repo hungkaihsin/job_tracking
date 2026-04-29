@@ -42,16 +42,39 @@ def get_service(creds_path: str, token_path: str):
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 
-# Gmail search query that catches the bulk of job-related mail.
-# Tune as needed; over-broad is fine because classifier.py filters again.
+# Gmail search query — specific phrases only. Single keywords like "interview"
+# or "offer" pull in tons of noise (Medium articles, Coursera ads, etc.).
 DEFAULT_QUERY = (
     '('
-    'subject:application OR subject:applied OR subject:applying '
-    'OR subject:interview OR subject:offer OR subject:assessment '
-    'OR subject:"phone screen" OR subject:"thank you for" '
-    'OR from:greenhouse.io OR from:lever.co OR from:myworkday.com '
-    'OR from:ashbyhq.com OR from:smartrecruiters.com'
+    'subject:"thank you for applying" '
+    'OR subject:"thank you for your application" '
+    'OR subject:"thank you for your interest" '
+    'OR subject:"your application" '
+    'OR subject:"application received" '
+    'OR subject:"application confirmation" '
+    'OR subject:"phone screen" '
+    'OR subject:"phone interview" '
+    'OR subject:"technical screen" '
+    'OR subject:"technical interview" '
+    'OR subject:"online assessment" '
+    'OR subject:"coding assessment" '
+    'OR subject:"interview invitation" '
+    'OR subject:"interview request" '
+    'OR subject:"final round" '
+    'OR subject:"next round" '
+    'OR subject:"offer letter" '
+    'OR subject:"hackerrank" '
+    'OR subject:"codesignal" '
+    'OR from:greenhouse.io '
+    'OR from:lever.co '
+    'OR from:myworkday.com '
+    'OR from:myworkdayjobs.com '
+    'OR from:ashbyhq.com '
+    'OR from:smartrecruiters.com '
+    'OR from:icims.com '
+    'OR from:jobvite.com'
     ')'
+    ' -from:medium.com -from:coursera.org -from:linkedin.com -from:indeed.com'
 )
 
 
