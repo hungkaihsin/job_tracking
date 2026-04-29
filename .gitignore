@@ -1,0 +1,19 @@
+# Secrets
+.env
+gmail_credentials.json
+gmail_token.json
+
+# Local state
+state.db
+bot.log
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
