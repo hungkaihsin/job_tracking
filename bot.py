@@ -14,6 +14,7 @@ and keeps running. To run manually for testing:
 """
 import argparse
 import logging
+import logging.handlers
 import os
 import sqlite3
 import sys
@@ -24,17 +25,22 @@ from dotenv import load_dotenv
 
 import classifier
 import gmail_client
+import llm_extract
 from notion_db import NotionDB
 
 load_dotenv()
 
 # ---------- logging ----------
+_LOG_PATH = os.path.join(os.path.dirname(__file__), "bot.log")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(os.path.dirname(__file__), "bot.log")),
+        # Rotate at 5 MB, keep 3 backups (bot.log + bot.log.1..3 = max ~20 MB).
+        logging.handlers.RotatingFileHandler(
+            _LOG_PATH, maxBytes=5 * 1024 * 1024, backupCount=3
+        ),
     ],
 )
 log = logging.getLogger("jobbot")
@@ -49,6 +55,12 @@ INITIAL_LOOKBACK_DAYS = int(os.environ.get("INITIAL_LOOKBACK_DAYS", "180"))
 STATE_PATH = os.path.join(os.path.dirname(__file__), "state.db")
 
 CONF_THRESHOLD = 0.55  # below this -> "Needs Review"
+
+# Optional Ollama-based position extraction for emails the heuristic classifier
+# couldn't fully parse. Heuristics run first; LLM only fills gaps.
+USE_LLM_EXTRACTION = os.environ.get("USE_LLM_EXTRACTION", "0") == "1"
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", llm_extract.DEFAULT_MODEL)
+_LLM_OK = False  # set in main() at startup
 
 
 # ---------- state DB (sqlite) ----------
@@ -143,13 +155,31 @@ def handle_message(msg: dict, db: NotionDB, state: sqlite3.Connection):
         mark_processed(state, msg["id"], "ignored", 0.0)
         return
 
-    is_low_conf = result.confidence < CONF_THRESHOLD or not result.company or not result.position
+    # LLM fallback: when heuristics couldn't extract a position but we have a
+    # company and a body, ask Ollama to read the email. Local, free, ~3s/email.
+    position = result.position
+    if not position and _LLM_OK and result.company and msg.get("body"):
+        try:
+            llm_pos = llm_extract.extract_position(
+                subject=msg["subject"],
+                body=msg["body"],
+                company=result.company,
+                model=OLLAMA_MODEL,
+            )
+            if llm_pos:
+                position = llm_pos
+                log.info("LLM filled position: %r for %s @ %s", llm_pos, msg["subject"][:40], result.company)
+        except Exception as e:
+            log.warning("LLM extract failed: %s", e)
+
+    # Only flag for manual review if we couldn't even identify the company.
+    # Position-Unknown is fine — many ATS confirmations don't mention the role.
+    needs_review = not result.company
 
     fields = {
         "company": result.company or "Unknown",
-        # Don't fall back to subject — that pollutes the Position column with "Thank you for applying" etc.
-        "position": result.position or "Unknown",
-        "status": result.status or ("Needs Review" if is_low_conf else "Applied"),
+        "position": position or "Unknown",
+        "status": result.status or ("Needs Review" if needs_review else "Applied"),
         "source": result.source or "Other",
         "last_update": msg["date"].date().isoformat(),
         "last_email_subject": msg["subject"],
@@ -157,10 +187,11 @@ def handle_message(msg: dict, db: NotionDB, state: sqlite3.Connection):
     if msg.get("first_url"):
         fields["job_link"] = msg["first_url"]
 
-    if is_low_conf:
+    if needs_review:
         fields["status"] = "Needs Review"
 
-    # Only set Applied date if we're creating a fresh row from an "Applied" email
+    # Only set Applied date when we're creating a fresh row from an "Applied" email.
+    # On update, notion_db.py skips Applied date so we don't clobber the spreadsheet date.
     if result.status == "Applied":
         fields["applied_date"] = msg["date"].date().isoformat()
 
@@ -181,6 +212,20 @@ def main():
     args = parser.parse_args()
 
     log.info("jobbot starting (poll=%ds, db=%s...)", POLL_INTERVAL, DB_ID[:8])
+
+    # Optional LLM: ping Ollama once at startup so we fail loud if it's misconfigured.
+    global _LLM_OK
+    if USE_LLM_EXTRACTION:
+        if llm_extract.is_ollama_available():
+            _LLM_OK = True
+            log.info("Ollama available — LLM position fallback enabled (model=%s)", OLLAMA_MODEL)
+        else:
+            log.warning(
+                "USE_LLM_EXTRACTION=1 but Ollama not reachable at %s. "
+                "Falling back to heuristic-only. Run `ollama serve` and retry.",
+                llm_extract.OLLAMA_BASE,
+            )
+
     state = open_state()
     gmail_svc = gmail_client.get_service(GMAIL_CREDS, GMAIL_TOKEN)
     db = NotionDB(NOTION_TOKEN, DB_ID)
