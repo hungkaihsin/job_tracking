@@ -15,14 +15,42 @@ Setup:
     OLLAMA_MODEL=llama3.2:3b      # optional; this is the default
 """
 import logging
+import os
 import re
+import time
 import requests
 from typing import Optional
 
 log = logging.getLogger("jobbot.llm")
 
+# Ollama (local fallback)
 OLLAMA_BASE = "http://localhost:11434"
 DEFAULT_MODEL = "llama3.2:3b"
+
+# Gemini (cloud, preferred when API key is set — much higher accuracy)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+# Rate-limit Gemini to stay under the free-tier RPM cap.
+# Flash:      10 RPM /  250 RPD
+# Flash-lite: 15 RPM / 1000 RPD  <-- recommended; 4x daily headroom
+_GEMINI_RPM_CAP = 13  # leave 2 RPM headroom for retry attempts
+_GEMINI_CALL_TIMES: list = []
+
+
+def _rate_limit_gemini():
+    """Block until we can safely make another Gemini call without 429-ing."""
+    now = time.time()
+    # Drop timestamps older than 60s
+    _GEMINI_CALL_TIMES[:] = [t for t in _GEMINI_CALL_TIMES if now - t < 60]
+    if len(_GEMINI_CALL_TIMES) >= _GEMINI_RPM_CAP:
+        oldest = _GEMINI_CALL_TIMES[0]
+        wait = 60 - (now - oldest) + 0.5
+        if wait > 0:
+            log.info("Gemini RPM pacing: sleeping %.1fs", wait)
+            time.sleep(wait)
+    _GEMINI_CALL_TIMES.append(time.time())
 
 
 def is_ollama_available(timeout: float = 2.0) -> bool:
@@ -83,20 +111,9 @@ def _clean_llm_output(s: str) -> Optional[str]:
     return s
 
 
-def extract_position(
-    subject: str,
-    body: str,
-    company: Optional[str] = None,
-    model: str = DEFAULT_MODEL,
-) -> Optional[str]:
-    """Use Ollama to extract the job title/position from an email.
-
-    Returns None if the LLM can't find one or Ollama is unavailable.
-    """
-    if not body and not subject:
-        return None
+def _build_prompt(subject: str, body: str, company: Optional[str]) -> str:
     body_excerpt = (body or "")[:2500]
-    prompt = f"""You extract structured data from job-application emails.
+    return f"""You extract structured data from job-application emails.
 
 Subject: {subject or "(none)"}
 Company: {company or "(unknown)"}
@@ -115,5 +132,75 @@ Rules:
 - Maximum 80 characters.
 
 Role title:"""
-    raw = _generate(prompt, model)
+
+
+def _extract_with_gemini(subject: str, body: str, company: Optional[str], model: str) -> Optional[str]:
+    """Call Gemini API with rate limiting and 429 backoff retry."""
+    url = f"{GEMINI_BASE}/models/{model}:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": _build_prompt(subject, body, company)}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 60,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    for attempt in range(3):
+        _rate_limit_gemini()
+        try:
+            r = requests.post(url, json=payload, timeout=20)
+        except requests.Timeout:
+            log.warning("Gemini timeout (attempt %d)", attempt + 1)
+            continue
+        except Exception as e:
+            log.warning("Gemini error: %s", e)
+            return None
+
+        if r.status_code == 200:
+            data = r.json()
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return None
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text = "".join(p.get("text", "") for p in parts).strip()
+            return text or None
+
+        if r.status_code == 429:
+            # Quota / rate limit. Pause and retry. The pacing usually prevents
+            # this, but bursts of pre-warmed timestamps can race.
+            wait = 15 * (attempt + 1)  # 15s, 30s, 45s
+            log.warning("Gemini 429 (rate limit), backing off %ds (attempt %d/3)", wait, attempt + 1)
+            time.sleep(wait)
+            continue
+
+        # Other non-success status — don't retry.
+        log.warning("Gemini returned %d: %s", r.status_code, r.text[:200])
+        return None
+
+    log.warning("Gemini exhausted all retries; returning None")
+    return None
+
+
+def extract_position(
+    subject: str,
+    body: str,
+    company: Optional[str] = None,
+    model: str = DEFAULT_MODEL,
+) -> Optional[str]:
+    """Extract job title from an email using LLM.
+
+    Provider selection:
+    - If GEMINI_API_KEY is set: Gemini ONLY (no Ollama fallback). Cleaner — avoids
+      404s when the local model has been removed; if Gemini fails, position stays
+      Unknown and the bot moves on.
+    - Otherwise: Ollama only.
+    """
+    if not body and not subject:
+        return None
+
+    if GEMINI_API_KEY:
+        raw = _extract_with_gemini(subject, body, company, GEMINI_MODEL)
+    else:
+        raw = _generate(_build_prompt(subject, body, company), model)
+
     return _clean_llm_output(raw)

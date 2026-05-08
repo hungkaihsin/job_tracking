@@ -18,10 +18,17 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    # Sheets write — used by sheet_sync.py to mirror Notion to a Google Sheet.
+    # Note: adding this scope invalidates existing tokens; user must redo OAuth.
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 
 
-def get_service(creds_path: str, token_path: str):
+def get_credentials(creds_path: str, token_path: str) -> Credentials:
+    """Get OAuth credentials with all SCOPES granted. Triggers browser consent
+    flow on first run; subsequent runs use the cached refresh token."""
     creds: Optional[Credentials] = None
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
@@ -39,6 +46,12 @@ def get_service(creds_path: str, token_path: str):
             creds = flow.run_local_server(port=0)
         with open(token_path, "w") as f:
             f.write(creds.to_json())
+    return creds
+
+
+def get_service(creds_path: str, token_path: str):
+    """Build the Gmail API client. Returns the googleapiclient service object."""
+    creds = get_credentials(creds_path, token_path)
     return build("gmail", "v1", credentials=creds, cache_discovery=False)
 
 

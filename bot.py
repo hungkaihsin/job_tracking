@@ -21,14 +21,16 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+# IMPORTANT: load_dotenv MUST run before importing llm_extract / sheet_sync,
+# because those modules read env vars (GEMINI_API_KEY, SHEET_ID) at module load.
 from dotenv import load_dotenv
+load_dotenv()
 
 import classifier
 import gmail_client
 import llm_extract
+import sheet_sync
 from notion_db import NotionDB
-
-load_dotenv()
 
 # ---------- logging ----------
 _LOG_PATH = os.path.join(os.path.dirname(__file__), "bot.log")
@@ -110,7 +112,7 @@ def set_meta(conn, key: str, value: str):
 
 
 # ---------- main pass ----------
-def run_once(state, gmail_svc, db: NotionDB) -> int:
+def run_once(state, gmail_svc, db: NotionDB, gmail_creds=None) -> int:
     last_seen = get_meta(state, "last_check_iso")
     if last_seen is None:
         # First run: look back INITIAL_LOOKBACK_DAYS
@@ -141,6 +143,13 @@ def run_once(state, gmail_svc, db: NotionDB) -> int:
 
     set_meta(state, "last_check_iso", datetime.now(timezone.utc).isoformat())
     log.info("Pass done: new=%d skipped=%d upserts=%d", new_count, skip_count, upserts)
+
+    # Mirror Notion -> Google Sheet whenever something changed.
+    if upserts > 0 and gmail_creds and sheet_sync.SHEET_ID:
+        err = sheet_sync.sync_to_sheet(gmail_creds, db)
+        if err:
+            log.warning("Sheet sync skipped: %s", err)
+
     return new_count
 
 
@@ -213,30 +222,34 @@ def main():
 
     log.info("jobbot starting (poll=%ds, db=%s...)", POLL_INTERVAL, DB_ID[:8])
 
-    # Optional LLM: ping Ollama once at startup so we fail loud if it's misconfigured.
+    # Optional LLM: prefer Gemini if API key present; otherwise check Ollama.
     global _LLM_OK
     if USE_LLM_EXTRACTION:
-        if llm_extract.is_ollama_available():
+        if llm_extract.GEMINI_API_KEY:
+            _LLM_OK = True
+            log.info("Gemini API enabled — LLM position fallback (model=%s)", llm_extract.GEMINI_MODEL)
+        elif llm_extract.is_ollama_available():
             _LLM_OK = True
             log.info("Ollama available — LLM position fallback enabled (model=%s)", OLLAMA_MODEL)
         else:
             log.warning(
-                "USE_LLM_EXTRACTION=1 but Ollama not reachable at %s. "
-                "Falling back to heuristic-only. Run `ollama serve` and retry.",
-                llm_extract.OLLAMA_BASE,
+                "USE_LLM_EXTRACTION=1 but no provider available "
+                "(set GEMINI_API_KEY or run `ollama serve`). Falling back to heuristic-only."
             )
 
     state = open_state()
-    gmail_svc = gmail_client.get_service(GMAIL_CREDS, GMAIL_TOKEN)
+    from googleapiclient.discovery import build as gapi_build
+    gmail_creds = gmail_client.get_credentials(GMAIL_CREDS, GMAIL_TOKEN)
+    gmail_svc = gapi_build("gmail", "v1", credentials=gmail_creds, cache_discovery=False)
     db = NotionDB(NOTION_TOKEN, DB_ID)
 
     if args.once:
-        run_once(state, gmail_svc, db)
+        run_once(state, gmail_svc, db, gmail_creds=gmail_creds)
         return
 
     while True:
         try:
-            run_once(state, gmail_svc, db)
+            run_once(state, gmail_svc, db, gmail_creds=gmail_creds)
         except Exception as e:
             log.exception("Pass failed: %s", e)
         log.info("Sleeping %ds...", POLL_INTERVAL)
