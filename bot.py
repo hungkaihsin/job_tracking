@@ -26,6 +26,8 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 load_dotenv()
 
+from google.auth.exceptions import RefreshError
+
 import classifier
 import gmail_client
 import llm_extract
@@ -239,7 +241,22 @@ def main():
 
     state = open_state()
     from googleapiclient.discovery import build as gapi_build
-    gmail_creds = gmail_client.get_credentials(GMAIL_CREDS, GMAIL_TOKEN)
+    # Auth errors here are PERMANENT (token revoked / creds file missing) —
+    # exit 0 so launchd's KeepAlive=SuccessfulExit-false stops respawning us.
+    # Recover by running `python bot.py --once` manually for browser OAuth.
+    try:
+        gmail_creds = gmail_client.get_credentials(GMAIL_CREDS, GMAIL_TOKEN)
+    except RefreshError as e:
+        log.error(
+            "Gmail OAuth token revoked or expired: %s. "
+            "Fix: rm %s && python bot.py --once (browser OAuth required). "
+            "Exiting cleanly; launchd will not respawn.",
+            e, GMAIL_TOKEN,
+        )
+        sys.exit(0)
+    except FileNotFoundError as e:
+        log.error("Gmail OAuth credentials missing: %s. Exiting cleanly.", e)
+        sys.exit(0)
     gmail_svc = gapi_build("gmail", "v1", credentials=gmail_creds, cache_discovery=False)
     db = NotionDB(NOTION_TOKEN, DB_ID)
 
